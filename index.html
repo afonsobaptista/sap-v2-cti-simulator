@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTI Simulator — SAP Service Cloud V2</title>
+<style>
+  :root { --bg:#f7f7f8; --card:#fff; --ink:#1d2433; --muted:#6b7280; --line:#e5e7eb; --acc:#0a6ed1; --ok:#188918; --bad:#bb0000; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:10px 12px; background:var(--ink); color:#fff; display:flex; justify-content:space-between; align-items:center; }
+  header b { font-size:14px; }
+  #state { font-size:11px; padding:2px 8px; border-radius:10px; background:#444; }
+  main { padding:10px 12px; display:grid; gap:10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:10px; }
+  h2 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  label { display:block; font-size:11px; color:var(--muted); margin-top:6px; }
+  input, select { width:100%; padding:5px 6px; border:1px solid var(--line); border-radius:4px; font:inherit; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  button { padding:6px 10px; border:1px solid var(--acc); background:var(--acc); color:#fff; border-radius:4px; cursor:pointer; font:inherit; }
+  button.sec { background:#fff; color:var(--acc); }
+  button.ok { background:var(--ok); border-color:var(--ok); }
+  button.bad { background:var(--bad); border-color:var(--bad); }
+  button:disabled { opacity:.4; cursor:default; }
+  details summary { cursor:pointer; color:var(--muted); font-size:12px; }
+  #log { font:11px/1.35 ui-monospace, Consolas, monospace; max-height:220px; overflow:auto; white-space:pre-wrap; background:#0f1520; color:#d6e2f0; padding:8px; border-radius:4px; }
+  .in { color:#7fd17f; } .out { color:#9cc8ff; } .warn { color:#ffcc66; }
+  #outbound { display:none; border-color:var(--acc); }
+</style>
+</head>
+<body>
+<header><b>CTI Simulator</b><span id="state">Livre</span></header>
+<main>
+
+  <section class="card" id="outbound">
+    <h2>Chamada de saída pedida pelo SAP</h2>
+    <div id="obInfo"></div>
+    <div class="btns">
+      <button class="ok" onclick="outboundAccept()">Atender (cliente atende)</button>
+      <button class="bad" onclick="outboundDismiss()">Ignorar</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Chamada recebida</h2>
+    <label>Número do cliente (ANI)</label>
+    <input id="ani" value="+351912345678">
+    <details style="margin-top:8px">
+      <summary>Call attached data (opcional)</summary>
+      <div class="row">
+        <div><label>CustomerID (nº BP)</label><input id="cad_CustomerID"></div>
+        <div><label>TicketID (case)</label><input id="cad_TicketID"></div>
+        <div><label>Serial</label><input id="cad_Serial"></div>
+        <div><label>ExternalID</label><input id="cad_ExternalID"></div>
+        <div><label>Email</label><input id="cad_Email"></div>
+        <div><label>Custom_1</label><input id="cad_Custom_1"></div>
+        <div><label>Custom_2</label><input id="cad_Custom_2"></div>
+        <div><label>Custom_3</label><input id="cad_Custom_3"></div>
+        <div><label>Custom_4</label><input id="cad_Custom_4"></div>
+      </div>
+    </details>
+    <div class="btns">
+      <button id="bNotify" onclick="notify()">1 · Tocar (Notify)</button>
+      <button id="bAccept" class="ok" onclick="accept()" disabled>2 · Atender (Accept)</button>
+      <button id="bEnd" class="bad" onclick="endCall()" disabled>3 · Desligar (End)</button>
+    </div>
+    <label style="margin-top:8px"><input type="checkbox" id="withRec" style="width:auto"> Enviar RecordingId no End (para testar playback)</label>
+  </section>
+
+  <section class="card">
+    <h2>Definições</h2>
+    <div class="row">
+      <div>
+        <label>Formato do payload</label>
+        <select id="fmt"><option value="xml">XML (como no exemplo SAP)</option><option value="json">JSON</option></select>
+      </div>
+      <div>
+        <label>Ação no Accept</label>
+        <select id="autoAccept"><option value="manual">Manual</option><option value="auto">Notify + Accept juntos</option></select>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Registo</h2>
+    <div id="log"></div>
+    <div class="btns"><button class="sec" onclick="logEl.innerHTML=''">Limpar</button></div>
+  </section>
+</main>
+
+<script>
+/*
+ * Simulador de CTI para o Agent Desktop do SAP Service Cloud Version 2.
+ * Segue o documento SAP "SAP Service Cloud Version 2 integration with Third-Party CTI Providers"
+ * (help.sap.com, 2026-08-19): o widget envia payloads ao Agent Desktop com window.parent.postMessage.
+ *   Notify  -> Type CALL, EventType INBOUND, Action NOTIFY   (não cria atividade)
+ *   Accept  -> Type CALL, EventType INBOUND, Action ACCEPT   (cria phone call activity com início)
+ *   End     -> Type CALL, EventType UPDATEACTIVITY, Action END (fecha a atividade; RecordingId opcional)
+ *   CAD     -> CustomerID, TicketID, Serial, ExternalID, Email, Custom_1..4 (em NOTIFY/ACCEPT/TRANSFER)
+ * O SAP envia ao widget: { Direction:"OUT", PhoneNumber, currentSessionId } (click-to-call)
+ *                        { type:"recordingPlayback", InteractionId, RecordingId } (playback)
+ */
+const logEl = document.getElementById('log');
+const stateEl = document.getElementById('state');
+let current = null; // { ani, extId, direction }
+
+function log(cls, title, body) {
+  const t = new Date().toLocaleTimeString();
+  const div = document.createElement('div');
+  div.className = cls;
+  div.textContent = `[${t}] ${title}` + (body ? `\n${body}` : '');
+  logEl.prepend(div);
+}
+
+function newExtId() {
+  const a = new Uint8Array(16); crypto.getRandomValues(a);
+  return Array.from(a, b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+}
+
+function escapeXml(s) {
+  return String(s).replace(/[<>&'"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;',"'":'&apos;','"':'&quot;'}[c]));
+}
+
+function serialize(params) {
+  if (document.getElementById('fmt').value === 'json') return JSON.stringify(params);
+  let x = "<?xml version='1.0' encoding='utf-8' ?> <payload> ";
+  for (const k in params) x += `<${k}>${escapeXml(params[k])}</${k}>`;
+  return x + "</payload>";
+}
+
+function cad() {
+  const out = {};
+  ['CustomerID','TicketID','Serial','ExternalID','Email','Custom_1','Custom_2','Custom_3','Custom_4'].forEach(k => {
+    const v = document.getElementById('cad_' + k).value.trim();
+    if (v) out[k] = v;
+  });
+  return out;
+}
+
+function send(params) {
+  const payload = serialize(params);
+  if (window.parent === window) {
+    log('warn', 'Aviso: a página não está dentro do Agent Desktop — payload não enviado.', payload);
+    return;
+  }
+  window.parent.postMessage(payload, '*');
+  log('out', `→ SAP: ${params.Action}`, payload);
+}
+
+function setState(text, bg) { stateEl.textContent = text; stateEl.style.background = bg; }
+function setButtons(n, a, e) {
+  document.getElementById('bNotify').disabled = !n;
+  document.getElementById('bAccept').disabled = !a;
+  document.getElementById('bEnd').disabled = !e;
+}
+
+function notify() {
+  const ani = document.getElementById('ani').value.trim();
+  if (!ani) { log('warn', 'Indique um número (ANI).'); return; }
+  current = { ani, extId: newExtId(), direction: 'INBOUND' };
+  send({ Type: 'CALL', EventType: 'INBOUND', Action: 'NOTIFY', ANI: ani, ExternalReferenceID: current.extId, ...cad() });
+  setState('A tocar', '#b26b00'); setButtons(false, true, false);
+  if (document.getElementById('autoAccept').value === 'auto') setTimeout(accept, 400);
+}
+
+function accept() {
+  if (!current) return;
+  send({ Type: 'CALL', EventType: current.direction, Action: 'ACCEPT', ANI: current.ani, ExternalReferenceID: current.extId, ...cad() });
+  setState('Em chamada', '#188918'); setButtons(false, false, true);
+}
+
+function endCall() {
+  if (!current) return;
+  const p = { Type: 'CALL', EventType: 'UPDATEACTIVITY', Action: 'END', ANI: current.ani, ExternalReferenceID: current.extId };
+  if (document.getElementById('withRec').checked) p.RecordingId = 'REC_' + newExtId();
+  send(p);
+  current = null; setState('Livre', '#444'); setButtons(true, false, false);
+}
+
+// Mensagens vindas do Agent Desktop (click-to-call e playback)
+let pendingOutbound = null;
+window.addEventListener('message', (ev) => {
+  let d = ev.data;
+  if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) { /* não-JSON */ } }
+  log('in', '← SAP (' + ev.origin + ')', typeof d === 'string' ? d : JSON.stringify(d, null, 1));
+  if (d && typeof d === 'object') {
+    if (d.Direction === 'OUT' && d.PhoneNumber) {
+      pendingOutbound = d;
+      document.getElementById('obInfo').textContent = 'Ligar para ' + d.PhoneNumber;
+      document.getElementById('outbound').style.display = 'block';
+    } else if (d.type === 'recordingPlayback') {
+      alert('Pedido de playback da gravação ' + d.RecordingId + ' (simulado — não há áudio).');
+    }
+  }
+});
+
+function outboundAccept() {
+  if (!pendingOutbound) return;
+  // O documento SAP só descreve o pedido de saída; aqui reutiliza-se o ACCEPT/END com EventType OUTBOUND.
+  // Se o tenant não criar a atividade, troque para 'INBOUND' e veja o registo.
+  current = { ani: pendingOutbound.PhoneNumber, extId: newExtId(), direction: 'OUTBOUND' };
+  document.getElementById('ani').value = current.ani;
+  document.getElementById('outbound').style.display = 'none';
+  pendingOutbound = null;
+  accept();
+}
+function outboundDismiss() { pendingOutbound = null; document.getElementById('outbound').style.display = 'none'; }
+
+log('warn', 'Simulador pronto. Embebido no Agent Desktop? ' + (window.parent !== window ? 'sim' : 'não'));
+</script>
+</body>
+</html>
